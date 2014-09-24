@@ -1,0 +1,88 @@
+- hosts: pg
+  sudo: true
+  vars:
+    pg_conf_dir: /etc/postgresql/9.3/main/
+    pg_main_conf: "{{ pg_conf_dir }}/postgresql.conf"
+    pg_hba_conf: "{{ pg_conf_dir }}/pg_hba.conf"
+    pg_data_dir: /var/lib/postgresql/9.3/main/
+    pg_repl_user: replicator
+    pg_repl_password: thepassword
+    default_eth: ansible_eth1
+  tasks:
+    - name: install pg
+      apt: pkg="{{ item }}" state=latest update_cache=false
+      with_items:
+        - postgresql
+        - postgresql-contrib
+        - python-psycopg2
+
+    - name: create replication user
+      sudo_user: postgres
+      postgresql_user:
+        name="{{ pg_repl_user }}"
+        password="{{ pg_repl_password }}"
+        encrypted=true
+        role_attr_flags=REPLICATION,LOGIN
+      when: "'master' in group_names"
+
+    - name: updating postgresql.conf
+      lineinfile:
+        dest="{{ pg_main_conf }}"
+        line="listen_addresses = '*'"
+        regexp='^listen_addresses.*$'
+      when: "'master' in group_names"
+
+    - name: update postgresql.conf
+      lineinfile:
+        dest="{{ pg_main_conf }}"
+        line="{{ item.line }}"
+        regexp="{{ item.regexp }}"
+      with_items:
+      - {line: "hot_standby = on", regexp: '^hot_standby.*$'}
+      - {line: "wal_level = hot_standby", regexp: '^wal_level.*$'}
+      - {line: "max_wal_senders = 3", regexp: '^max_wal_senders.*$'}
+      - {line: "checkpoint_segments = 8", regexp: '^checkpoint_segments.*$'}
+      - {line: "wal_keep_segments = 8", regexp: '^wal_keep_segments.*$'}
+
+    - name: updating postgresql.conf
+      lineinfile:
+        dest="{{ pg_hba_conf }}"
+        line="hostssl replication {{ pg_repl_user }} {{ hostvars[groups['slave'][0]][default_eth]['ipv4']['address'] }}/32 md5"
+      when: "'master' in group_names"
+
+    - name: restart postgresql
+      service: name=postgresql state=restarted
+      when: "'master' in group_names"
+
+    - name: stop postgresql
+      service: name=postgresql state=stopped
+      when: "'slave' in group_names"
+
+    - name: remove data
+      file:
+        path="{{ pg_data_dir }}"
+        state=absent
+      when: "'slave' in group_names"
+
+    - name: copy files
+      sudo_user: postgres
+      command: "pg_basebackup -h {{ hostvars[groups['master'][0]][default_eth]['ipv4']['address'] }} -D {{ pg_data_dir }} -U {{ pg_repl_user }} -v -P"
+      environment:
+        PGPASSWORD: "{{ pg_repl_password }}"
+      when: "'slave' in group_names"
+
+    - name: create recovery.conf
+      template:
+        src="recovery.conf.j2"
+        dest="{{pg_data_dir}}/recovery.conf"
+      when: "'slave' in group_names"
+
+    - name: start pg
+      service:
+        name=postgresql
+        state=started
+      when: "'slave' in group_names"
+
+
+
+
